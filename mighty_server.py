@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Mighty Raffle Bot - Proxy-Enabled Server
-Supports Philippines proxies for Railway deployment
-Set PROXY_URL environment variable to use proxy
+Mighty Raffle Bot - Improved Server (Based on Go Implementation)
+Key: Solves fresh Turnstile token for EACH draw attempt
 """
 
 from flask import Flask, request, jsonify, send_file
@@ -15,16 +14,14 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 from urllib.parse import urlparse
 
-# Try curl_cffi first, fallback to cloudscraper
 try:
     from curl_cffi import requests as curl_requests
     USE_CURL_CFFI = True
     print("[INIT] Using curl_cffi")
 except ImportError:
-    import cloudscraper
     import requests
     USE_CURL_CFFI = False
-    print("[INIT] Using cloudscraper")
+    print("[INIT] Using requests")
 
 app = Flask(__name__)
 CORS(app)
@@ -39,10 +36,10 @@ TURNSTILE_SITE_KEY = "0x4AAAAAAAOvhBMVIyoS3i1k"
 TURNSTILE_PAGE_URL = "https://mighty.ph/login"
 
 # Proxy configuration
-PROXY_URL = os.environ.get('PROXY_URL', None)  # Format: http://user:pass@host:port or http://host:port
+PROXY_URL = os.environ.get('PROXY_URL', None)
 
 def parse_proxy():
-    """Parse proxy URL into format needed by requests"""
+    """Parse proxy URL"""
     if not PROXY_URL:
         return None
     
@@ -53,14 +50,33 @@ def parse_proxy():
                 'http': PROXY_URL,
                 'https': PROXY_URL
             }
-            print(f"[PROXY] Using proxy: {parsed.scheme}://{parsed.netloc.split('@')[-1]}")
+            print(f"[PROXY] Configured: {parsed.netloc.split('@')[-1]}")
             return proxy_dict
     except Exception as e:
-        print(f"[PROXY] Error parsing proxy: {e}")
+        print(f"[PROXY] Error: {e}")
     
     return None
 
 PROXIES = parse_proxy()
+
+def get_realistic_headers():
+    """Generate realistic headers like the Go version"""
+    return {
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Content-Type': 'application/json',
+        'Origin': 'https://mighty.ph',
+        'Referer': 'https://mighty.ph/',
+        'Sec-Ch-Ua': '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36'
+    }
 
 def get_session():
     """Get or create a session"""
@@ -72,13 +88,10 @@ def get_session():
                 )
                 return session
             else:
-                scraper = cloudscraper.create_scraper(
-                    browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-                )
-                # Set proxy if available
+                session = requests.Session()
                 if PROXIES:
-                    scraper.proxies.update(PROXIES)
-                return scraper
+                    session.proxies.update(PROXIES)
+                return session
         return sessions.pop()
 
 def return_session(session):
@@ -104,21 +117,10 @@ def index():
     
     return jsonify({
         'status': 'online',
-        'name': 'Mighty Raffle Bot API (Proxy-Enabled)',
-        'version': '3.0',
+        'name': 'Mighty Raffle Bot API (Go-Style)',
+        'version': '5.0',
+        'note': 'Fresh Turnstile token per draw (like Go version)',
         'proxy': 'enabled' if PROXIES else 'disabled',
-        'proxy_location': 'Philippines' if PROXIES else 'Direct',
-        'cloudflare_bypass': 'curl_cffi' if USE_CURL_CFFI else 'cloudscraper',
-        'endpoints': [
-            'GET /',
-            'GET /api/health',
-            'POST /api/turnstile',
-            'POST /api/login',
-            'GET /api/raffles',
-            'POST /api/draw',
-            'POST /api/check-points',
-            'GET /api/stats'
-        ]
     }), 200
 
 @app.route('/api/health')
@@ -131,48 +133,51 @@ def health():
 
 @app.route('/api/turnstile', methods=['POST'])
 def solve_turnstile():
+    """
+    Solve Turnstile captcha
+    IMPORTANT: Based on Go code, this should be called for EVERY draw, not just login
+    """
     if not CAPSOLVER_API_KEY:
         return jsonify({'success': False, 'error': 'API key not configured'}), 400
     
     try:
         session = get_session()
         
-        # Create task
+        print(f"[TURNSTILE] Creating task...")
+        
+        # Step 1: Create task
+        create_payload = {
+            'clientKey': CAPSOLVER_API_KEY,
+            'task': {
+                'type': 'AntiTurnstileTaskProxyLess',
+                'websiteURL': TURNSTILE_PAGE_URL,
+                'websiteKey': TURNSTILE_SITE_KEY
+            }
+        }
+        
         if USE_CURL_CFFI:
             response = session.post('https://api.capsolver.com/createTask',
-                json={
-                    'clientKey': CAPSOLVER_API_KEY,
-                    'task': {
-                        'type': 'AntiTurnstileTaskProxyLess',
-                        'websiteURL': TURNSTILE_PAGE_URL,
-                        'websiteKey': TURNSTILE_SITE_KEY
-                    }
-                },
+                json=create_payload,
                 impersonate="chrome120",
                 timeout=30
             )
         else:
             response = session.post('https://api.capsolver.com/createTask',
-                json={
-                    'clientKey': CAPSOLVER_API_KEY,
-                    'task': {
-                        'type': 'AntiTurnstileTaskProxyLess',
-                        'websiteURL': TURNSTILE_PAGE_URL,
-                        'websiteKey': TURNSTILE_SITE_KEY
-                    }
-                },
+                json=create_payload,
                 timeout=30
             )
         
         result = response.json()
         
         if result.get('errorId', 0) != 0:
-            return jsonify({'success': False, 'error': result.get('errorDescription')}), 400
+            error = result.get('errorDescription', 'Unknown error')
+            print(f"[TURNSTILE] ✗ Error: {error}")
+            return jsonify({'success': False, 'error': error}), 400
         
         task_id = result.get('taskId')
-        print(f"[TURNSTILE] Task: {task_id}")
+        print(f"[TURNSTILE] Task created: {task_id}")
         
-        # Poll for result
+        # Step 2: Poll for result (like Go version - max 40 attempts, 3 sec each = 2 min timeout)
         for i in range(40):
             time.sleep(3)
             
@@ -192,21 +197,27 @@ def solve_turnstile():
             
             if result_data.get('status') == 'ready':
                 token = result_data['solution']['token']
-                print(f"[TURNSTILE] ✓ Solved")
+                print(f"[TURNSTILE] ✓ Solved (attempt {i+1})")
                 return jsonify({'success': True, 'token': token})
             elif result_data.get('status') == 'failed':
+                print(f"[TURNSTILE] ✗ Task failed")
                 return jsonify({'success': False, 'error': 'Task failed'}), 400
         
+        print(f"[TURNSTILE] ✗ Timeout after 2 minutes")
         return jsonify({'success': False, 'error': 'Timeout'}), 408
         
     except Exception as e:
-        print(f"[TURNSTILE] Error: {e}")
+        print(f"[TURNSTILE] ✗ Exception: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
     finally:
         return_session(session)
 
 @app.route('/api/login', methods=['POST'])
 def login():
+    """
+    Login endpoint - matches Go implementation
+    Uses cfts_v3 for login (not cfts_v2)
+    """
     data = request.json
     username = data.get('username')
     password = data.get('password')
@@ -215,34 +226,21 @@ def login():
     if not turnstile_token:
         return jsonify({'success': False, 'message': 'Turnstile token required'}), 400
     
-    print(f"[LOGIN] Attempting: {username} {'[via proxy]' if PROXIES else '[direct]'}")
+    print(f"[LOGIN] Attempting: {username}")
     
     session = get_session()
     try:
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Origin': 'https://mighty.ph',
-            'Referer': 'https://mighty.ph/login',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site'
-        }
+        headers = get_realistic_headers()
         
+        # Go code uses cfts_v3 for login
         payload = {
             'username': username,
             'password': password,
-            'cfts_v3': turnstile_token
+            'cfts_v3': turnstile_token  # Important: v3 for login!
         }
         
-        # Human-like delay
-        time.sleep(random.uniform(1.5, 3.0))
+        # Add delay like Go version (5 seconds between accounts)
+        time.sleep(random.uniform(1.0, 2.0))
         
         if USE_CURL_CFFI:
             response = session.post(
@@ -260,34 +258,33 @@ def login():
                 timeout=30
             )
         
-        print(f"[LOGIN] Status: {response.status_code}")
+        status = response.status_code
+        print(f"[LOGIN] Status: {status}")
         
-        if response.status_code == 403:
-            msg = "Cloudflare blocked - "
+        if status == 403:
+            print(f"[LOGIN] ✗ 403 Cloudflare block")
+            msg = "Cloudflare blocked. "
             if not PROXIES:
-                msg += "Consider using Philippines proxy (see GEOGRAPHIC_FIX.md)"
+                msg += "Solution: Deploy to Fly.io Singapore or use residential proxy"
             else:
-                msg += "Proxy might be detected, try different proxy"
-            print(f"[LOGIN] ✗ 403 Forbidden")
+                msg += "Proxy detected. Try: 1) Residential proxy 2) Fly.io Singapore"
             return jsonify({'success': False, 'message': msg}), 403
         
-        if response.status_code == 503:
+        if status == 503:
             return jsonify({'success': False, 'message': 'Service unavailable'}), 503
         
-        if response.status_code == 429:
-            return jsonify({'success': False, 'message': 'Rate limited - Wait 30s'}), 429
+        if status == 429:
+            return jsonify({'success': False, 'message': 'Rate limited'}), 429
         
         text = response.text
         
-        # Check for HTML response
+        # Check for HTML (Cloudflare challenge)
         if text.strip().startswith('<') or '<html' in text.lower():
-            msg = "Cloudflare challenge - "
-            if not PROXIES:
-                msg += "SOLUTION: Use Philippines proxy or deploy to Fly.io Singapore region"
-            else:
-                msg += "Try different proxy or wait 60 seconds"
-            print(f"[LOGIN] ✗ HTML response (Cloudflare)")
-            return jsonify({'success': False, 'message': msg}), 403
+            print(f"[LOGIN] ✗ Cloudflare HTML response")
+            return jsonify({
+                'success': False,
+                'message': 'Cloudflare challenge. Deploy to Fly.io Singapore for best results'
+            }), 403
         
         try:
             result = json.loads(text)
@@ -295,7 +292,7 @@ def login():
             print(f"[LOGIN] ✗ Invalid JSON")
             return jsonify({'success': False, 'message': 'Invalid response'}), 500
         
-        # Success
+        # Check success (code 200 like Go version)
         if result.get('code') == 200:
             if result.get('data') and result['data'].get('token'):
                 print(f"[LOGIN] ✓ {username} SUCCESS!")
@@ -305,7 +302,6 @@ def login():
                     'user': result['data'].get('user', {})
                 })
         
-        # Error
         error_msg = result.get('message', 'Unknown error')
         print(f"[LOGIN] ✗ {username}: {error_msg}")
         
@@ -324,25 +320,21 @@ def login():
 
 @app.route('/api/raffles', methods=['GET'])
 def get_raffles():
+    """Get available raffles - same as Go version"""
     session = get_session()
     try:
+        headers = get_realistic_headers()
+        del headers['Content-Type']
+        
         if USE_CURL_CFFI:
             response = session.get('https://be.mighty.ph/api/v1/raffles',
-                headers={
-                    'Accept': 'application/json',
-                    'Origin': 'https://mighty.ph',
-                    'Referer': 'https://mighty.ph/'
-                },
+                headers=headers,
                 impersonate="chrome120",
                 timeout=30
             )
         else:
             response = session.get('https://be.mighty.ph/api/v1/raffles',
-                headers={
-                    'Accept': 'application/json',
-                    'Origin': 'https://mighty.ph',
-                    'Referer': 'https://mighty.ph/'
-                },
+                headers=headers,
                 timeout=30
             )
         
@@ -360,29 +352,35 @@ def get_raffles():
 
 @app.route('/api/draw', methods=['POST'])
 def execute_draw():
+    """
+    Execute raffle draw - matches Go implementation
+    IMPORTANT: Uses cfts_v2 for draws (not cfts_v3)!
+    """
     data = request.json
     token = data.get('token')
     raffle_id = data.get('raffleId')
     turnstile_token = data.get('turnstileToken')
     
+    # Generate browser ID like Go version
     timestamp = int(time.time() * 1000000000)
     random_part = random.randint(0, 1000000000000)
     browser_id = f"{timestamp:x}{random_part:x}"
     
     session = get_session()
     try:
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'Authorization': f'Bearer {token}',
-            'Origin': 'https://mighty.ph',
-            'Referer': 'https://mighty.ph/'
-        }
+        headers = get_realistic_headers()
+        headers['Authorization'] = f'Bearer {token}'
+        headers['Host'] = 'be.mighty.ph'
         
+        # IMPORTANT: Go code uses cfts_v2 for draws, not cfts_v3!
         payload = {
             'browser_id': browser_id,
-            'cfts_v2': turnstile_token
+            'cfts_v2': turnstile_token  # v2 for draws!
         }
+        
+        # Add jitter like Go version
+        jitter = random.uniform(0, 2.0)
+        time.sleep(jitter)
         
         if USE_CURL_CFFI:
             response = session.put(f'https://be.mighty.ph/api/v1/raffle/register/{raffle_id}',
@@ -398,19 +396,23 @@ def execute_draw():
                 timeout=30
             )
         
+        # Check for rate limit (status 429)
         if response.status_code == 429:
             return jsonify({'success': False, 'isRateLimit': True, 'message': 'Rate limited'})
         
         text = response.text
         
+        # Check for rate limit text
         if text.startswith('Too many'):
             return jsonify({'success': False, 'isRateLimit': True, 'message': text})
         
+        # Check for Cloudflare HTML
         if text.startswith('<'):
-            return jsonify({'success': False, 'isRateLimit': False, 'message': 'Cloudflare'})
+            return jsonify({'success': False, 'isRateLimit': False, 'message': 'Cloudflare protection'})
         
         result = response.json()
         
+        # Success case (code 201 like Go version)
         if result.get('code') == 201:
             msg = result.get('reward', {}).get('message', 'Success')
             return jsonify({'success': True, 'isRateLimit': False, 'message': msg})
@@ -425,30 +427,25 @@ def execute_draw():
 
 @app.route('/api/check-points', methods=['POST'])
 def get_points():
+    """Check account points - same as Go version"""
     data = request.json
     token = data.get('token')
     
     session = get_session()
     try:
+        headers = get_realistic_headers()
+        headers['Authorization'] = f'Bearer {token}'
+        del headers['Content-Type']
+        
         if USE_CURL_CFFI:
             response = session.get('https://be.mighty.ph/api/v1/user/points',
-                headers={
-                    'Accept': 'application/json',
-                    'Authorization': f'Bearer {token}',
-                    'Origin': 'https://mighty.ph',
-                    'Referer': 'https://mighty.ph/'
-                },
+                headers=headers,
                 impersonate="chrome120",
                 timeout=30
             )
         else:
             response = session.get('https://be.mighty.ph/api/v1/user/points',
-                headers={
-                    'Accept': 'application/json',
-                    'Authorization': f'Bearer {token}',
-                    'Origin': 'https://mighty.ph',
-                    'Referer': 'https://mighty.ph/'
-                },
+                headers=headers,
                 timeout=30
             )
         
@@ -470,6 +467,7 @@ def get_points():
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
+    """Get server statistics"""
     with accounts_lock:
         total_accounts = len(accounts)
     
@@ -478,9 +476,9 @@ def get_stats():
         'totalAccounts': total_accounts,
         'activeThreads': threading.active_count(),
         'sessionPoolSize': len(sessions),
-        'bypass_method': 'curl_cffi' if USE_CURL_CFFI else 'cloudscraper',
+        'bypass_method': 'curl_cffi' if USE_CURL_CFFI else 'requests',
         'proxy': 'enabled' if PROXIES else 'disabled',
-        'proxy_configured': bool(PROXY_URL),
+        'implementation': 'Go-style (fresh token per draw)',
         'timestamp': time.time()
     })
 
@@ -489,27 +487,25 @@ if __name__ == '__main__':
     
     print(f"""
 ╔═══════════════════════════════════════════════════════╗
-║   Mighty Raffle Bot - Proxy-Enabled Server v3.0      ║
+║   Mighty Raffle Bot - Go-Style Server v5.0           ║
 ╠═══════════════════════════════════════════════════════╣
 ║                                                       ║
-║  Bypass Method: {('curl_cffi' if USE_CURL_CFFI else 'cloudscraper'):<36} ║
-║  Proxy Status:  {('ENABLED (PH)' if PROXIES else 'DISABLED (Direct)'):<36} ║
-║  Server Port:   {port:<36} ║
+║  Implementation: Based on Go code                     ║
+║  Key Feature:    Fresh Turnstile per draw            ║
+║  Bypass:         {('curl_cffi' if USE_CURL_CFFI else 'requests'):<36} ║
+║  Proxy:          {('ENABLED' if PROXIES else 'DISABLED'):<36} ║
 ║                                                       ║
-║  {'⚠️  WARNING: No proxy detected!' if not PROXIES else '✓ Philippines proxy active':<53} ║
-║  {'   Railway US → PH website = High block rate' if not PROXIES else '   Requests via PH proxy = Better success':<53} ║
-║  {'   Set PROXY_URL environment variable!' if not PROXIES else '':<53} ║
+║  IMPORTANT NOTES:                                     ║
+║  • Login uses cfts_v3                                 ║
+║  • Draws use cfts_v2                                  ║
+║  • Fresh token solved for EACH draw                   ║
+║  • 6-8 second delays between attempts                 ║
+║                                                       ║
+{"║  ⚠️  No proxy - High Cloudflare block rate         ║" if not PROXIES else "║  ✓ Proxy configured                                ║"}
+{"║     Best solution: Fly.io Singapore                ║" if not PROXIES else ""}
 ║                                                       ║
 ╚═══════════════════════════════════════════════════════╝
     """)
-    
-    if not PROXIES:
-        print("⚠️  TIP: Add Philippines proxy for better success rate:")
-        print("   1. Get proxy from Webshare.io or similar")
-        print("   2. Set environment variable:")
-        print("      PROXY_URL=http://user:pass@proxy-host:port")
-        print("   3. Restart server")
-        print()
     
     try:
         from waitress import serve
