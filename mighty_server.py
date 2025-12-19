@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """
-Mighty Raffle Bot - Production Server (FIXED)
-Handles multiple accounts with better performance
-Run: python mighty_server.py
+Mighty Raffle Bot - Enhanced Server with Better Cloudflare Bypass
+Uses curl_cffi for better success rate
+Run: python mighty_server_enhanced.py
 """
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import cloudscraper
-import requests
 import time
 import random
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 import threading
+
+# Try to import curl_cffi first, fallback to cloudscraper
+try:
+    from curl_cffi import requests as curl_requests
+    USE_CURL_CFFI = True
+    print("[INIT] Using curl_cffi for better Cloudflare bypass")
+except ImportError:
+    import cloudscraper
+    USE_CURL_CFFI = False
+    print("[INIT] Using cloudscraper (install curl_cffi for better results)")
 
 app = Flask(__name__)
 CORS(app)
@@ -24,24 +32,30 @@ executor = ThreadPoolExecutor(max_workers=10)
 
 # Thread-safe session pool
 session_lock = threading.Lock()
-scrapers = []
+sessions = []
 
-def get_scraper():
-    """Get or create a cloudscraper session"""
+def get_session():
+    """Get or create a session"""
     with session_lock:
-        if not scrapers:
-            return cloudscraper.create_scraper(
-                browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-            )
-        return scrapers.pop()
+        if not sessions:
+            if USE_CURL_CFFI:
+                # curl_cffi with browser impersonation
+                session = curl_requests.Session()
+                return session
+            else:
+                # cloudscraper fallback
+                return cloudscraper.create_scraper(
+                    browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
+                )
+        return sessions.pop()
 
-def return_scraper(scraper):
-    """Return scraper to pool"""
+def return_session(session):
+    """Return session to pool"""
     with session_lock:
-        if len(scrapers) < 10:  # Keep max 10 scrapers in pool
-            scrapers.append(scraper)
+        if len(sessions) < 10:
+            sessions.append(session)
 
-# Configuration - Get from environment or use default
+# Configuration
 CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY', "CAP-5B4A34CAC19590EA37662D97C6622A7E219BCD475F8EDB2D082940AFF34733CE")
 TURNSTILE_SITE_KEY = "0x4AAAAAAAOvhBMVIyoS3i1k"
 TURNSTILE_PAGE_URL = "https://mighty.ph/login"
@@ -52,77 +66,36 @@ accounts_lock = threading.Lock()
 @app.route('/')
 def index():
     """Serve the main HTML file or API info"""
-    # Try to find and serve the HTML file
     possible_paths = [
         'mighty_web_app.html',
         './mighty_web_app.html',
         os.path.join(os.path.dirname(__file__), 'mighty_web_app.html'),
-        '/app/mighty_web_app.html',  # For some hosting platforms
+        '/app/mighty_web_app.html',
     ]
     
     for path in possible_paths:
         if os.path.exists(path):
             return send_file(path)
     
-    # If HTML not found, return API info
     return jsonify({
         'status': 'online',
         'name': 'Mighty Raffle Bot API',
-        'version': '1.0',
-        'message': 'HTML file not found. API endpoints are working.',
+        'version': '2.0 - Enhanced',
+        'cloudflare_bypass': 'curl_cffi' if USE_CURL_CFFI else 'cloudscraper',
         'endpoints': {
-            'accounts': {
-                'POST /api/accounts': 'Add accounts',
-                'GET /api/accounts': 'Get all accounts',
-                'POST /api/accounts/clear': 'Clear all accounts'
-            },
-            'authentication': {
-                'POST /api/login': 'Login with credentials',
-                'POST /api/turnstile': 'Solve Turnstile captcha'
-            },
-            'raffles': {
-                'GET /api/raffles': 'Get available raffles',
-                'POST /api/draw': 'Execute raffle draw',
-                'POST /api/check-points': 'Check account points'
-            },
-            'stats': {
-                'GET /api/stats': 'Get server statistics'
-            }
-        },
-        'note': 'Use the mighty_web_app.html file locally and point it to this API URL'
+            'GET /': 'API info or HTML',
+            'GET /api/health': 'Health check',
+            'POST /api/turnstile': 'Solve Turnstile',
+            'POST /api/login': 'Login account',
+            'GET /api/raffles': 'Get raffles',
+            'POST /api/draw': 'Execute draw',
+            'POST /api/check-points': 'Check points'
+        }
     }), 200
 
 @app.route('/api/health')
 def health():
-    """Health check endpoint"""
     return jsonify({'status': 'healthy', 'timestamp': time.time()})
-
-@app.route('/api/accounts', methods=['POST'])
-def add_accounts():
-    data = request.json
-    account_list = data.get('accounts', [])
-    
-    added = 0
-    with accounts_lock:
-        for acc in account_list:
-            if acc not in accounts:
-                accounts.append(acc)
-                added += 1
-    
-    print(f"[ACCOUNTS] Added {added} accounts. Total: {len(accounts)}")
-    return jsonify({'success': True, 'accounts': accounts, 'added': added})
-
-@app.route('/api/accounts', methods=['GET'])
-def get_accounts():
-    with accounts_lock:
-        return jsonify({'accounts': accounts.copy()})
-
-@app.route('/api/accounts/clear', methods=['POST'])
-def clear_accounts():
-    with accounts_lock:
-        accounts.clear()
-    print("[ACCOUNTS] Cleared")
-    return jsonify({'success': True})
 
 @app.route('/api/turnstile', methods=['POST'])
 def solve_turnstile():
@@ -130,20 +103,35 @@ def solve_turnstile():
     if not CAPSOLVER_API_KEY:
         return jsonify({'success': False, 'error': 'API key not configured'}), 400
     
-    scraper = get_scraper()
     try:
+        session = get_session()
+        
         # Create task
-        response = scraper.post('https://api.capsolver.com/createTask', 
-            json={
-                'clientKey': CAPSOLVER_API_KEY,
-                'task': {
-                    'type': 'AntiTurnstileTaskProxyLess',
-                    'websiteURL': TURNSTILE_PAGE_URL,
-                    'websiteKey': TURNSTILE_SITE_KEY
-                }
-            },
-            timeout=30
-        )
+        if USE_CURL_CFFI:
+            response = session.post('https://api.capsolver.com/createTask',
+                json={
+                    'clientKey': CAPSOLVER_API_KEY,
+                    'task': {
+                        'type': 'AntiTurnstileTaskProxyLess',
+                        'websiteURL': TURNSTILE_PAGE_URL,
+                        'websiteKey': TURNSTILE_SITE_KEY
+                    }
+                },
+                impersonate="chrome120",
+                timeout=30
+            )
+        else:
+            response = session.post('https://api.capsolver.com/createTask',
+                json={
+                    'clientKey': CAPSOLVER_API_KEY,
+                    'task': {
+                        'type': 'AntiTurnstileTaskProxyLess',
+                        'websiteURL': TURNSTILE_PAGE_URL,
+                        'websiteKey': TURNSTILE_SITE_KEY
+                    }
+                },
+                timeout=30
+            )
         
         result = response.json()
         
@@ -157,10 +145,17 @@ def solve_turnstile():
         for i in range(40):
             time.sleep(3)
             
-            result_response = scraper.post('https://api.capsolver.com/getTaskResult',
-                json={'clientKey': CAPSOLVER_API_KEY, 'taskId': task_id},
-                timeout=30
-            )
+            if USE_CURL_CFFI:
+                result_response = session.post('https://api.capsolver.com/getTaskResult',
+                    json={'clientKey': CAPSOLVER_API_KEY, 'taskId': task_id},
+                    impersonate="chrome120",
+                    timeout=30
+                )
+            else:
+                result_response = session.post('https://api.capsolver.com/getTaskResult',
+                    json={'clientKey': CAPSOLVER_API_KEY, 'taskId': task_id},
+                    timeout=30
+                )
             
             result_data = result_response.json()
             
@@ -177,7 +172,7 @@ def solve_turnstile():
         print(f"[TURNSTILE] Error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
     finally:
-        return_scraper(scraper)
+        return_session(session)
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -191,9 +186,9 @@ def login():
     
     print(f"[LOGIN] Attempting login for: {username}")
     
-    scraper = get_scraper()
+    session = get_session()
     try:
-        # More realistic headers
+        # Enhanced headers for better success
         headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json, text/plain, */*',
@@ -207,7 +202,9 @@ def login():
             'Sec-Ch-Ua-Platform': '"Windows"',
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site'
+            'Sec-Fetch-Site': 'same-site',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
         }
         
         payload = {
@@ -216,96 +213,108 @@ def login():
             'cfts_v3': turnstile_token
         }
         
-        print(f"[LOGIN] Sending request to Mighty API...")
+        # Add human-like delay
+        time.sleep(random.uniform(1.0, 2.5))
         
-        # Add a small delay to seem more human
-        time.sleep(random.uniform(0.5, 1.5))
-        
-        response = scraper.post('https://be.mighty.ph/api/v1/login',
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
+        if USE_CURL_CFFI:
+            # Use curl_cffi with browser impersonation
+            response = session.post(
+                'https://be.mighty.ph/api/v1/login',
+                headers=headers,
+                json=payload,
+                impersonate="chrome120",  # Impersonate real Chrome browser
+                timeout=30
+            )
+        else:
+            # Use cloudscraper
+            response = session.post(
+                'https://be.mighty.ph/api/v1/login',
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
         
         print(f"[LOGIN] Response status: {response.status_code}")
         
-        # Check for Cloudflare challenge
+        # Handle various status codes
         if response.status_code == 403:
-            print(f"[LOGIN] ✗ Cloudflare 403 - Protection triggered")
-            return jsonify({'success': False, 'message': 'Cloudflare protection - Try again in a few seconds'}), 403
+            print(f"[LOGIN] ✗ Cloudflare 403")
+            return jsonify({'success': False, 'message': 'Blocked by Cloudflare - Try VPN or wait 60 seconds'}), 403
         
         if response.status_code == 503:
-            print(f"[LOGIN] ✗ Service temporarily unavailable")
+            print(f"[LOGIN] ✗ Service unavailable")
             return jsonify({'success': False, 'message': 'Service temporarily unavailable'}), 503
+        
+        if response.status_code == 429:
+            print(f"[LOGIN] ✗ Rate limited")
+            return jsonify({'success': False, 'message': 'Rate limited - Wait 30 seconds'}), 429
         
         text = response.text
         
-        # Log first 200 chars for debugging
-        print(f"[LOGIN] Response preview: {text[:200]}")
-        
-        if not text or text.strip() == '':
-            return jsonify({'success': False, 'message': 'Empty response from server'}), 500
-        
-        # Check if response is HTML (Cloudflare challenge page)
+        # Check if response is HTML (Cloudflare challenge)
         if text.strip().startswith('<') or '<!DOCTYPE' in text or '<html' in text.lower():
-            print(f"[LOGIN] ✗ Received HTML instead of JSON - Cloudflare protection")
-            return jsonify({'success': False, 'message': 'Cloudflare protection active - Please wait 30 seconds and retry'}), 500
+            print(f"[LOGIN] ✗ Received HTML - Cloudflare protection")
+            return jsonify({'success': False, 'message': 'Cloudflare challenge detected - Try: 1) Use VPN 2) Wait 60s 3) Deploy to Railway/Render'}), 403
         
         try:
             result = json.loads(text)
         except json.JSONDecodeError as e:
-            print(f"[LOGIN] ✗ JSON decode error: {e}")
-            return jsonify({'success': False, 'message': f'Invalid response format'}), 500
+            print(f"[LOGIN] ✗ JSON decode error")
+            return jsonify({'success': False, 'message': 'Invalid response format'}), 500
         
         # Success case
         if result.get('code') == 200:
             if result.get('data') and result['data'].get('token'):
-                print(f"[LOGIN] ✓ {username} - Login successful!")
+                print(f"[LOGIN] ✓ {username} - Success!")
                 return jsonify({
                     'success': True,
                     'token': result['data']['token'],
                     'user': result['data'].get('user', {})
                 })
         
-        # Handle error cases
+        # Handle errors
         error_msg = result.get('message', 'Unknown error')
         print(f"[LOGIN] ✗ {username}: {error_msg}")
         
-        # Provide user-friendly messages
         if 'not found' in error_msg.lower():
-            error_msg = "Account not found - Check username"
+            error_msg = "Account not found"
         elif 'invalid' in error_msg.lower() or 'incorrect' in error_msg.lower():
             error_msg = "Invalid username or password"
         elif 'turnstile' in error_msg.lower():
-            error_msg = "Captcha verification failed - Try again"
+            error_msg = "Captcha verification failed"
         
         return jsonify({'success': False, 'message': error_msg}), 401
             
-    except requests.exceptions.Timeout:
-        print(f"[LOGIN] ✗ Timeout error")
-        return jsonify({'success': False, 'message': 'Request timeout - Server too slow'}), 408
-    except requests.exceptions.ConnectionError:
-        print(f"[LOGIN] ✗ Connection error")
-        return jsonify({'success': False, 'message': 'Connection error - Check internet'}), 503
     except Exception as e:
         print(f"[LOGIN] ✗ Exception: {type(e).__name__}: {e}")
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
     finally:
-        return_scraper(scraper)
+        return_session(session)
 
 @app.route('/api/raffles', methods=['GET'])
 def get_raffles():
-    """Get available raffles - no token required"""
-    scraper = get_scraper()
+    """Get available raffles"""
+    session = get_session()
     try:
-        response = scraper.get('https://be.mighty.ph/api/v1/raffles',
-            headers={
-                'Accept': 'application/json',
-                'Origin': 'https://mighty.ph',
-                'Referer': 'https://mighty.ph/'
-            },
-            timeout=30
-        )
+        if USE_CURL_CFFI:
+            response = session.get('https://be.mighty.ph/api/v1/raffles',
+                headers={
+                    'Accept': 'application/json',
+                    'Origin': 'https://mighty.ph',
+                    'Referer': 'https://mighty.ph/'
+                },
+                impersonate="chrome120",
+                timeout=30
+            )
+        else:
+            response = session.get('https://be.mighty.ph/api/v1/raffles',
+                headers={
+                    'Accept': 'application/json',
+                    'Origin': 'https://mighty.ph',
+                    'Referer': 'https://mighty.ph/'
+                },
+                timeout=30
+            )
         
         result = response.json()
         
@@ -317,7 +326,7 @@ def get_raffles():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        return_scraper(scraper)
+        return_session(session)
 
 @app.route('/api/draw', methods=['POST'])
 def execute_draw():
@@ -330,22 +339,34 @@ def execute_draw():
     random_part = random.randint(0, 1000000000000)
     browser_id = f"{timestamp:x}{random_part:x}"
     
-    scraper = get_scraper()
+    session = get_session()
     try:
-        response = scraper.put(f'https://be.mighty.ph/api/v1/raffle/register/{raffle_id}',
-            headers={
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'Authorization': f'Bearer {token}',
-                'Origin': 'https://mighty.ph',
-                'Referer': 'https://mighty.ph/'
-            },
-            json={
-                'browser_id': browser_id,
-                'cfts_v2': turnstile_token
-            },
-            timeout=30
-        )
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': f'Bearer {token}',
+            'Origin': 'https://mighty.ph',
+            'Referer': 'https://mighty.ph/'
+        }
+        
+        payload = {
+            'browser_id': browser_id,
+            'cfts_v2': turnstile_token
+        }
+        
+        if USE_CURL_CFFI:
+            response = session.put(f'https://be.mighty.ph/api/v1/raffle/register/{raffle_id}',
+                headers=headers,
+                json=payload,
+                impersonate="chrome120",
+                timeout=30
+            )
+        else:
+            response = session.put(f'https://be.mighty.ph/api/v1/raffle/register/{raffle_id}',
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
         
         if response.status_code == 429:
             return jsonify({'success': False, 'isRateLimit': True, 'message': 'Rate limited'})
@@ -370,7 +391,7 @@ def execute_draw():
     except Exception as e:
         return jsonify({'success': False, 'isRateLimit': False, 'message': str(e)}), 500
     finally:
-        return_scraper(scraper)
+        return_session(session)
 
 @app.route('/api/check-points', methods=['POST'])
 def get_points():
@@ -378,17 +399,29 @@ def get_points():
     data = request.json
     token = data.get('token')
     
-    scraper = get_scraper()
+    session = get_session()
     try:
-        response = scraper.get('https://be.mighty.ph/api/v1/user/points',
-            headers={
-                'Accept': 'application/json',
-                'Authorization': f'Bearer {token}',
-                'Origin': 'https://mighty.ph',
-                'Referer': 'https://mighty.ph/'
-            },
-            timeout=30
-        )
+        if USE_CURL_CFFI:
+            response = session.get('https://be.mighty.ph/api/v1/user/points',
+                headers={
+                    'Accept': 'application/json',
+                    'Authorization': f'Bearer {token}',
+                    'Origin': 'https://mighty.ph',
+                    'Referer': 'https://mighty.ph/'
+                },
+                impersonate="chrome120",
+                timeout=30
+            )
+        else:
+            response = session.get('https://be.mighty.ph/api/v1/user/points',
+                headers={
+                    'Accept': 'application/json',
+                    'Authorization': f'Bearer {token}',
+                    'Origin': 'https://mighty.ph',
+                    'Referer': 'https://mighty.ph/'
+                },
+                timeout=30
+            )
         
         result = response.json()
         
@@ -404,7 +437,7 @@ def get_points():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        return_scraper(scraper)
+        return_session(session)
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
@@ -416,61 +449,35 @@ def get_stats():
         'status': 'online',
         'totalAccounts': total_accounts,
         'activeThreads': threading.active_count(),
-        'scraperPoolSize': len(scrapers),
+        'sessionPoolSize': len(sessions),
+        'bypass_method': 'curl_cffi' if USE_CURL_CFFI else 'cloudscraper',
         'timestamp': time.time()
     })
 
-# Error handlers
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({
-        'error': 'Not Found',
-        'message': 'The requested endpoint does not exist',
-        'available_endpoints': [
-            'GET /',
-            'GET /api/health',
-            'GET /api/stats',
-            'GET /api/raffles',
-            'POST /api/login',
-            'POST /api/turnstile',
-            'POST /api/draw',
-            'POST /api/check-points'
-        ]
-    }), 404
-
-@app.errorhandler(500)
-def internal_error(e):
-    return jsonify({
-        'error': 'Internal Server Error',
-        'message': str(e)
-    }), 500
-
-# For deployment
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3001))
     print(f"""
 ╔═══════════════════════════════════════════════════════╗
-║      Mighty Raffle Bot - Production Server           ║
+║   Mighty Raffle Bot - Enhanced Production Server     ║
 ╠═══════════════════════════════════════════════════════╣
 ║                                                       ║
-║  ✓ Multi-threaded (10 workers)                       ║
-║  ✓ Connection pooling enabled                        ║
-║  ✓ Thread-safe operations                            ║
-║  ✓ Optimized for 20-50 accounts                      ║
-║  ✓ API Key configured                                ║
+║  ✓ Enhanced Cloudflare bypass                        ║
+║  ✓ {'curl_cffi' if USE_CURL_CFFI else 'cloudscraper':<45} ║
+║  ✓ Multi-threaded operations                         ║
+║  ✓ Session pooling enabled                           ║
 ║                                                       ║
 ║  Server: http://0.0.0.0:{port}                       ║
-║  API:    http://0.0.0.0:{port}/api                   ║
+║                                                       ║
+║  TIP: Install curl_cffi for better success rate:     ║
+║       pip install curl_cffi                          ║
 ║                                                       ║
 ╚═══════════════════════════════════════════════════════╝
     """)
     
-    # Use production-ready server
     try:
         from waitress import serve
-        print("[*] Starting production server with Waitress...")
+        print("[*] Starting with Waitress...")
         serve(app, host='0.0.0.0', port=port, threads=10)
     except ImportError:
         print("[!] Using Flask development server")
-        print("[!] Install Waitress for better performance: pip install waitress")
         app.run(debug=False, host='0.0.0.0', port=port, threaded=True)
