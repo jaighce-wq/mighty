@@ -493,32 +493,45 @@
             for (const account of accounts) {
                 if (!state.isDrawing) break;
                 
+                // Check if account should skip (insufficient coins from previous attempt)
+                if (account.skipRemainingAttempts) {
+                    completed += attempts;
+                    updateProgress(completed, total);
+                    continue;
+                }
+                
                 for (let i = 1; i <= attempts; i++) {
                     if (!state.isDrawing) break;
                     
                     const logPrefix = `[${account.username}] Attempt ${i}/${attempts}`;
-                    addLog('drawLogs', `${logPrefix}: Processing...`, 'info');
+                    addLog('drawLogs', `${logPrefix}: Solving Turnstile...`, 'info');
                     
                     try {
-                        // Get turnstile token
+                        // IMPORTANT: Get fresh Turnstile token for EACH draw (like Go version)
                         const tRes = await fetch(`${API}/turnstile`, { 
                             method: 'POST', 
                             headers: { 'Content-Type': 'application/json' } 
                         });
+                        
+                        if (!tRes.ok) {
+                            throw new Error(`Turnstile failed: ${tRes.status}`);
+                        }
+                        
                         const tData = await tRes.json();
                         if (!tData.success) throw new Error('Turnstile solve failed');
                         
-                        // Random delay
+                        addLog('drawLogs', `${logPrefix}: Executing draw...`, 'info');
+                        
+                        // Add jitter (0-2 seconds like Go version)
                         await sleep(Math.random() * 2000);
                         
-                        // Execute draw
                         const dRes = await fetch(`${API}/draw`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ 
                                 token: account.token, 
                                 raffleId, 
-                                turnstileToken: tData.token 
+                                turnstileToken: tData.token  // Fresh token for each attempt!
                             })
                         });
                         const dData = await dRes.json();
@@ -534,10 +547,13 @@
                             addLog('drawLogs', `${logPrefix}: ⚠ Rate limited! Waiting 20s...`, 'warning');
                             await sleep(20000);
                             i--; // Retry this attempt
+                            completed--;
+                            state.results.total--;
                             continue;
                         } else if (dData.message && dData.message.toLowerCase().includes('insufficient coins')) {
                             state.results.fail++;
                             addLog('drawLogs', `${logPrefix}: ⚠ Insufficient coins - Skipping remaining attempts`, 'warning');
+                            account.skipRemainingAttempts = true;
                             completed += (attempts - i);
                             break;
                         } else {
@@ -548,8 +564,12 @@
                         updateProgress(completed, total);
                         updateResults();
                         
-                        // Wait between attempts
-                        await sleep(6000 + Math.random() * 2000);
+                        // Wait between attempts (6-8 seconds like Go version)
+                        if (i < attempts) {
+                            const waitTime = 6000 + Math.random() * 2000;
+                            addLog('drawLogs', `${logPrefix}: Waiting ${(waitTime/1000).toFixed(1)}s...`, 'info');
+                            await sleep(waitTime);
+                        }
                         
                     } catch (e) {
                         state.results.fail++;
@@ -561,8 +581,11 @@
                     }
                 }
                 
-                // Wait between accounts
-                if (state.isDrawing) await sleep(3000);
+                // Wait between accounts (4-7 seconds like Go version)
+                if (state.isDrawing && account !== accounts[accounts.length - 1]) {
+                    const waitTime = 4000 + Math.random() * 3000;
+                    await sleep(waitTime);
+                }
             }
             
             finishDrawing();
