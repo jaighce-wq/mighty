@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Mighty Raffle Bot - Production Server
+Mighty Raffle Bot - Production Server (FIXED)
 Handles multiple accounts with better performance
 Run: python mighty_server.py
 """
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import cloudscraper
 import time
@@ -40,8 +40,8 @@ def return_scraper(scraper):
         if len(scrapers) < 10:  # Keep max 10 scrapers in pool
             scrapers.append(scraper)
 
-# Configuration - API Key is now hardcoded
-CAPSOLVER_API_KEY = "CAP-5B4A34CAC19590EA37662D97C6622A7E219BCD475F8EDB2D082940AFF34733CE"
+# Configuration - Get from environment or use default
+CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY', "CAP-5B4A34CAC19590EA37662D97C6622A7E219BCD475F8EDB2D082940AFF34733CE")
 TURNSTILE_SITE_KEY = "0x4AAAAAAAOvhBMVIyoS3i1k"
 TURNSTILE_PAGE_URL = "https://mighty.ph/login"
 
@@ -50,7 +50,51 @@ accounts_lock = threading.Lock()
 
 @app.route('/')
 def index():
-    return send_from_directory('.', 'mighty_web_app.html')
+    """Serve the main HTML file or API info"""
+    # Try to find and serve the HTML file
+    possible_paths = [
+        'mighty_web_app.html',
+        './mighty_web_app.html',
+        os.path.join(os.path.dirname(__file__), 'mighty_web_app.html'),
+        '/app/mighty_web_app.html',  # For some hosting platforms
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return send_file(path)
+    
+    # If HTML not found, return API info
+    return jsonify({
+        'status': 'online',
+        'name': 'Mighty Raffle Bot API',
+        'version': '1.0',
+        'message': 'HTML file not found. API endpoints are working.',
+        'endpoints': {
+            'accounts': {
+                'POST /api/accounts': 'Add accounts',
+                'GET /api/accounts': 'Get all accounts',
+                'POST /api/accounts/clear': 'Clear all accounts'
+            },
+            'authentication': {
+                'POST /api/login': 'Login with credentials',
+                'POST /api/turnstile': 'Solve Turnstile captcha'
+            },
+            'raffles': {
+                'GET /api/raffles': 'Get available raffles',
+                'POST /api/draw': 'Execute raffle draw',
+                'POST /api/check-points': 'Check account points'
+            },
+            'stats': {
+                'GET /api/stats': 'Get server statistics'
+            }
+        },
+        'note': 'Use the mighty_web_app.html file locally and point it to this API URL'
+    }), 200
+
+@app.route('/api/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy', 'timestamp': time.time()})
 
 @app.route('/api/accounts', methods=['POST'])
 def add_accounts():
@@ -79,10 +123,11 @@ def clear_accounts():
     print("[ACCOUNTS] Cleared")
     return jsonify({'success': True})
 
-@app.route('/api/solve-turnstile', methods=['POST'])
+@app.route('/api/turnstile', methods=['POST'])
 def solve_turnstile():
+    """Solve Turnstile captcha"""
     if not CAPSOLVER_API_KEY:
-        return jsonify({'error': 'API key not configured'}), 400
+        return jsonify({'success': False, 'error': 'API key not configured'}), 400
     
     scraper = get_scraper()
     try:
@@ -102,7 +147,7 @@ def solve_turnstile():
         result = response.json()
         
         if result.get('errorId', 0) != 0:
-            return jsonify({'error': result.get('errorDescription', 'Unknown error')}), 400
+            return jsonify({'success': False, 'error': result.get('errorDescription', 'Unknown error')}), 400
         
         task_id = result.get('taskId')
         print(f"[TURNSTILE] Task: {task_id}")
@@ -123,13 +168,13 @@ def solve_turnstile():
                 print(f"[TURNSTILE] ✓ Solved")
                 return jsonify({'success': True, 'token': token})
             elif result_data.get('status') == 'failed':
-                return jsonify({'error': 'Task failed'}), 400
+                return jsonify({'success': False, 'error': 'Task failed'}), 400
         
-        return jsonify({'error': 'Timeout'}), 408
+        return jsonify({'success': False, 'error': 'Timeout'}), 408
         
     except Exception as e:
         print(f"[TURNSTILE] Error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
     finally:
         return_scraper(scraper)
 
@@ -139,6 +184,9 @@ def login():
     username = data.get('username')
     password = data.get('password')
     turnstile_token = data.get('turnstileToken')
+    
+    if not turnstile_token:
+        return jsonify({'success': False, 'message': 'Turnstile token required'}), 400
     
     print(f"[LOGIN] {username}")
     
@@ -168,15 +216,15 @@ def login():
         text = response.text
         
         if not text or text.strip() == '':
-            return jsonify({'error': 'Empty response'}), 500
+            return jsonify({'success': False, 'message': 'Empty response from server'}), 500
         
         if text.startswith('<'):
-            return jsonify({'error': 'Cloudflare protection'}), 500
+            return jsonify({'success': False, 'message': 'Cloudflare protection triggered'}), 500
         
         try:
             result = json.loads(text)
         except json.JSONDecodeError:
-            return jsonify({'error': f'Invalid JSON: {text[:200]}'}), 500
+            return jsonify({'success': False, 'message': f'Invalid response: {text[:100]}'}), 500
         
         if result.get('code') == 200:
             if result.get('data') and result['data'].get('token'):
@@ -191,29 +239,26 @@ def login():
         print(f"[LOGIN] ✗ {username}: {error_msg}")
         
         if 'not found' in error_msg.lower():
-            error_msg = f"Account '{username}' not found"
-        elif 'invalid' in error_msg.lower():
-            error_msg = f"Invalid credentials for '{username}'"
+            error_msg = f"Account not found"
+        elif 'invalid' in error_msg.lower() or 'incorrect' in error_msg.lower():
+            error_msg = f"Invalid username or password"
         
-        return jsonify({'success': False, 'error': error_msg}), 401
+        return jsonify({'success': False, 'message': error_msg}), 401
             
     except Exception as e:
         print(f"[LOGIN] Exception: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
     finally:
         return_scraper(scraper)
 
-@app.route('/api/raffles', methods=['POST'])
+@app.route('/api/raffles', methods=['GET'])
 def get_raffles():
-    data = request.json
-    token = data.get('token')
-    
+    """Get available raffles - no token required"""
     scraper = get_scraper()
     try:
         response = scraper.get('https://be.mighty.ph/api/v1/raffles',
             headers={
                 'Accept': 'application/json',
-                'Authorization': f'Bearer {token}',
                 'Origin': 'https://mighty.ph',
                 'Referer': 'https://mighty.ph/'
             },
@@ -225,10 +270,10 @@ def get_raffles():
         if result.get('code') == 200:
             return jsonify({'success': True, 'raffles': result.get('data', [])})
         else:
-            return jsonify({'error': result.get('message')}), 400
+            return jsonify({'success': False, 'message': result.get('message')}), 400
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'message': str(e)}), 500
     finally:
         return_scraper(scraper)
 
@@ -285,8 +330,9 @@ def execute_draw():
     finally:
         return_scraper(scraper)
 
-@app.route('/api/points', methods=['POST'])
+@app.route('/api/check-points', methods=['POST'])
 def get_points():
+    """Check account points"""
     data = request.json
     token = data.get('token')
     
@@ -311,10 +357,10 @@ def get_points():
                 'redXLPoints': result.get('redXLPoints', 0)
             })
         else:
-            return jsonify({'error': result.get('message')}), 400
+            return jsonify({'success': False, 'message': result.get('message')}), 400
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'message': str(e)}), 500
     finally:
         return_scraper(scraper)
 
@@ -325,13 +371,42 @@ def get_stats():
         total_accounts = len(accounts)
     
     return jsonify({
+        'status': 'online',
         'totalAccounts': total_accounts,
         'activeThreads': threading.active_count(),
-        'scraperPoolSize': len(scrapers)
+        'scraperPoolSize': len(scrapers),
+        'timestamp': time.time()
     })
 
+# Error handlers
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({
+        'error': 'Not Found',
+        'message': 'The requested endpoint does not exist',
+        'available_endpoints': [
+            'GET /',
+            'GET /api/health',
+            'GET /api/stats',
+            'GET /api/raffles',
+            'POST /api/login',
+            'POST /api/turnstile',
+            'POST /api/draw',
+            'POST /api/check-points'
+        ]
+    }), 404
+
+@app.errorhandler(500)
+def internal_error(e):
+    return jsonify({
+        'error': 'Internal Server Error',
+        'message': str(e)
+    }), 500
+
+# For deployment
 if __name__ == '__main__':
-    print("""
+    port = int(os.environ.get('PORT', 3001))
+    print(f"""
 ╔═══════════════════════════════════════════════════════╗
 ║      Mighty Raffle Bot - Production Server           ║
 ╠═══════════════════════════════════════════════════════╣
@@ -340,9 +415,10 @@ if __name__ == '__main__':
 ║  ✓ Connection pooling enabled                        ║
 ║  ✓ Thread-safe operations                            ║
 ║  ✓ Optimized for 20-50 accounts                      ║
-║  ✓ API Key pre-configured                            ║
+║  ✓ API Key configured                                ║
 ║                                                       ║
-║  Open: http://localhost:5000                         ║
+║  Server: http://0.0.0.0:{port}                       ║
+║  API:    http://0.0.0.0:{port}/api                   ║
 ║                                                       ║
 ╚═══════════════════════════════════════════════════════╝
     """)
@@ -351,8 +427,8 @@ if __name__ == '__main__':
     try:
         from waitress import serve
         print("[*] Starting production server with Waitress...")
-        serve(app, host='0.0.0.0', port=5000, threads=10)
+        serve(app, host='0.0.0.0', port=port, threads=10)
     except ImportError:
-        print("[!] Waitress not installed. Using development server.")
-        print("[!] Install for better performance: pip install waitress")
-        app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
+        print("[!] Using Flask development server")
+        print("[!] Install Waitress for better performance: pip install waitress")
+        app.run(debug=False, host='0.0.0.0', port=port, threaded=True)
