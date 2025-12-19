@@ -220,7 +220,12 @@
     </div>
 
     <script>
-       const API = 'https://web-production-735be.up.railway.app/api';
+        // Change this to your deployed server URL
+        // For local: 'http://localhost:3001/api'
+        // For deployed: 'https://your-app.up.railway.app/api'
+        const API = window.location.hostname === 'localhost' 
+            ? 'http://localhost:3001/api' 
+            : `${window.location.protocol}//${window.location.host}/api`;
         
         const state = {
             accounts: [],
@@ -311,12 +316,35 @@
             
             for (const acc of state.accounts) {
                 try {
-                    addLog('loginLogs', `Logging in: ${acc.username}`, 'info');
+                    addLog('loginLogs', `[${acc.username}] Getting Turnstile token...`, 'info');
                     
+                    // Get Turnstile token first
+                    const turnstileRes = await fetch(`${API}/turnstile`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    
+                    if (!turnstileRes.ok) {
+                        throw new Error(`Turnstile failed: ${turnstileRes.status}`);
+                    }
+                    
+                    const turnstileData = await turnstileRes.json();
+                    
+                    if (!turnstileData.success || !turnstileData.token) {
+                        throw new Error(turnstileData.error || 'Turnstile solve failed');
+                    }
+                    
+                    addLog('loginLogs', `[${acc.username}] Logging in...`, 'info');
+                    
+                    // Now login with Turnstile token
                     const res = await fetch(`${API}/login`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ username: acc.username, password: acc.password })
+                        body: JSON.stringify({ 
+                            username: acc.username, 
+                            password: acc.password,
+                            turnstileToken: turnstileData.token
+                        })
                     });
                     
                     const data = await res.json();
@@ -324,10 +352,11 @@
                     if (data.success && data.token) {
                         acc.token = data.token;
                         acc.status = 'logged-in';
-                        addLog('loginLogs', `✓ ${acc.username}: Success`, 'success');
+                        addLog('loginLogs', `✓ ${acc.username}: Login successful!`, 'success');
                     } else {
                         acc.status = 'failed';
-                        addLog('loginLogs', `✗ ${acc.username}: ${data.message}`, 'error');
+                        const errorMsg = data.message || data.error || 'Login failed';
+                        addLog('loginLogs', `✗ ${acc.username}: ${errorMsg}`, 'error');
                     }
                     
                 } catch (e) {
@@ -336,7 +365,7 @@
                 }
                 
                 updateUI();
-                await sleep(1000);
+                await sleep(2000); // Wait between accounts
             }
             
             addLog('loginLogs', 'Login process complete!', 'success');
