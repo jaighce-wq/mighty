@@ -8,6 +8,7 @@ Run: python mighty_server.py
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import cloudscraper
+import requests
 import time
 import random
 import json
@@ -188,17 +189,25 @@ def login():
     if not turnstile_token:
         return jsonify({'success': False, 'message': 'Turnstile token required'}), 400
     
-    print(f"[LOGIN] {username}")
+    print(f"[LOGIN] Attempting login for: {username}")
     
     scraper = get_scraper()
     try:
+        # More realistic headers
         headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
             'Origin': 'https://mighty.ph',
-            'Referer': 'https://mighty.ph/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'Referer': 'https://mighty.ph/login',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site'
         }
         
         payload = {
@@ -207,46 +216,79 @@ def login():
             'cfts_v3': turnstile_token
         }
         
+        print(f"[LOGIN] Sending request to Mighty API...")
+        
+        # Add a small delay to seem more human
+        time.sleep(random.uniform(0.5, 1.5))
+        
         response = scraper.post('https://be.mighty.ph/api/v1/login',
             headers=headers,
             json=payload,
             timeout=30
         )
         
+        print(f"[LOGIN] Response status: {response.status_code}")
+        
+        # Check for Cloudflare challenge
+        if response.status_code == 403:
+            print(f"[LOGIN] ✗ Cloudflare 403 - Protection triggered")
+            return jsonify({'success': False, 'message': 'Cloudflare protection - Try again in a few seconds'}), 403
+        
+        if response.status_code == 503:
+            print(f"[LOGIN] ✗ Service temporarily unavailable")
+            return jsonify({'success': False, 'message': 'Service temporarily unavailable'}), 503
+        
         text = response.text
+        
+        # Log first 200 chars for debugging
+        print(f"[LOGIN] Response preview: {text[:200]}")
         
         if not text or text.strip() == '':
             return jsonify({'success': False, 'message': 'Empty response from server'}), 500
         
-        if text.startswith('<'):
-            return jsonify({'success': False, 'message': 'Cloudflare protection triggered'}), 500
+        # Check if response is HTML (Cloudflare challenge page)
+        if text.strip().startswith('<') or '<!DOCTYPE' in text or '<html' in text.lower():
+            print(f"[LOGIN] ✗ Received HTML instead of JSON - Cloudflare protection")
+            return jsonify({'success': False, 'message': 'Cloudflare protection active - Please wait 30 seconds and retry'}), 500
         
         try:
             result = json.loads(text)
-        except json.JSONDecodeError:
-            return jsonify({'success': False, 'message': f'Invalid response: {text[:100]}'}), 500
+        except json.JSONDecodeError as e:
+            print(f"[LOGIN] ✗ JSON decode error: {e}")
+            return jsonify({'success': False, 'message': f'Invalid response format'}), 500
         
+        # Success case
         if result.get('code') == 200:
             if result.get('data') and result['data'].get('token'):
-                print(f"[LOGIN] ✓ {username}")
+                print(f"[LOGIN] ✓ {username} - Login successful!")
                 return jsonify({
                     'success': True,
                     'token': result['data']['token'],
                     'user': result['data'].get('user', {})
                 })
         
+        # Handle error cases
         error_msg = result.get('message', 'Unknown error')
         print(f"[LOGIN] ✗ {username}: {error_msg}")
         
+        # Provide user-friendly messages
         if 'not found' in error_msg.lower():
-            error_msg = f"Account not found"
+            error_msg = "Account not found - Check username"
         elif 'invalid' in error_msg.lower() or 'incorrect' in error_msg.lower():
-            error_msg = f"Invalid username or password"
+            error_msg = "Invalid username or password"
+        elif 'turnstile' in error_msg.lower():
+            error_msg = "Captcha verification failed - Try again"
         
         return jsonify({'success': False, 'message': error_msg}), 401
             
+    except requests.exceptions.Timeout:
+        print(f"[LOGIN] ✗ Timeout error")
+        return jsonify({'success': False, 'message': 'Request timeout - Server too slow'}), 408
+    except requests.exceptions.ConnectionError:
+        print(f"[LOGIN] ✗ Connection error")
+        return jsonify({'success': False, 'message': 'Connection error - Check internet'}), 503
     except Exception as e:
-        print(f"[LOGIN] Exception: {e}")
+        print(f"[LOGIN] ✗ Exception: {type(e).__name__}: {e}")
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
     finally:
         return_scraper(scraper)
